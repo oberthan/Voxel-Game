@@ -163,7 +163,18 @@ public class Chunk : MonoBehaviour
             }
         }
 
-        Mesh mesh = new Mesh();
+        MeshFilter mf = GetComponent<MeshFilter>();
+        MeshRenderer mr = GetComponent<MeshRenderer>();
+        Mesh mesh = mf.sharedMesh;
+        if(mesh == null)
+        {
+            mesh = new Mesh();
+            mesh.name = $"Chunk_{chunkX}_{chunkZ}";
+        } else
+        {
+            mesh.Clear();
+        }
+
         mesh.indexFormat = verts.Count > 65000 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
         mesh.SetVertices(verts);
         mesh.SetTriangles(tris, 0);
@@ -172,9 +183,6 @@ public class Chunk : MonoBehaviour
         mesh.Optimize();
         mesh.OptimizeIndexBuffers();
         mesh.OptimizeReorderVertexBuffer();
-
-        MeshFilter mf = GetComponent<MeshFilter>();
-        MeshRenderer mr = GetComponent<MeshRenderer>();
 
         mf.sharedMesh = mesh;
 
@@ -214,7 +222,17 @@ public class Chunk : MonoBehaviour
     public void Clear()
     {
         var mf = GetComponent<MeshFilter>();
-        if (mf) mf.sharedMesh = null;
+        if (mf != null && mf.sharedMesh != null)
+        {
+            if (Application.isPlaying)
+            {
+                Destroy(mf.sharedMesh);
+            }
+            else
+            {
+                DestroyImmediate(mf.sharedMesh);
+            }
+        }
 
         var mc = GetComponent<MeshCollider>();
         if (mc) mc.sharedMesh = null;
