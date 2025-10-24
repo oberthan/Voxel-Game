@@ -8,6 +8,9 @@ using UnityEngine;
 
 public class Chunk : MonoBehaviour
 {
+    MeshFilter mf;
+    MeshCollider mc;
+
     int sizeX, sizeY, sizeZ;
     float blockSize;
     int chunkX, chunkZ;
@@ -53,6 +56,12 @@ public class Chunk : MonoBehaviour
     {
         Vector3.back, Vector3.forward, Vector3.left, Vector3.right, Vector3.down, Vector3.up
     };
+
+    private void Awake()
+    {
+        mf = GetComponent<MeshFilter>();
+        mc = GetComponent<MeshCollider>();
+    }
 
     public void Initialize(int chunkSizeX, int chunkSizeY, float bSize, int cx, int cz, TerrainGenerator vt)
     {
@@ -163,8 +172,6 @@ public class Chunk : MonoBehaviour
             }
         }
 
-        MeshFilter mf = GetComponent<MeshFilter>();
-        MeshRenderer mr = GetComponent<MeshRenderer>();
         Mesh mesh = mf.sharedMesh;
         if(mesh == null)
         {
@@ -187,7 +194,6 @@ public class Chunk : MonoBehaviour
         mf.sharedMesh = mesh;
 
         // Optional: add collider
-        MeshCollider mc = GetComponent<MeshCollider>();
         if (mc == null) mc = gameObject.AddComponent<MeshCollider>();
         mc.sharedMesh = mesh;
     }
@@ -221,7 +227,6 @@ public class Chunk : MonoBehaviour
 
     public void Clear()
     {
-        var mf = GetComponent<MeshFilter>();
         if (mf != null && mf.sharedMesh != null)
         {
             if (Application.isPlaying)
@@ -234,7 +239,6 @@ public class Chunk : MonoBehaviour
             }
         }
 
-        var mc = GetComponent<MeshCollider>();
         if (mc) mc.sharedMesh = null;
     }
 
