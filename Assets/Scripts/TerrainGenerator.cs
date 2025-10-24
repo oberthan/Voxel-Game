@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Threading;
 using System.Threading.Tasks;
 using Unity.VisualScripting;
@@ -10,6 +11,8 @@ using Random = UnityEngine.Random;
 
 public class TerrainGenerator : MonoBehaviour
 {
+
+
     public int renderDistance = 4;
     public int chunkSize = 16; // X and Z dimensions per chunk
     public int chunkHeight = 64; // Y dimension per chunk
@@ -37,6 +40,12 @@ public class TerrainGenerator : MonoBehaviour
     private Dictionary<Vector2Int, Chunk> chunks = new Dictionary<Vector2Int, Chunk>();
     private Vector2Int lastPlayerChunk;
 
+
+    private SemaphoreSlim generationSemaphore;
+    public int maxConcurrentGenerations = Math.Max(1, System.Environment.ProcessorCount - 1); // tune to CPU cores (e.g. Environment.ProcessorCount)
+    private ConcurrentDictionary<Vector2Int, Task> runningTasks = new ConcurrentDictionary<Vector2Int, Task>();
+    private int maxQueuedMeshes = 64; // tune
+
     private Queue<GameObject> chunkPool = new Queue<GameObject>();
     // thread-safe queue of finished meshes to apply on main thread
     private ConcurrentQueue<(Chunk chunk, MeshData meshData)> meshQueue = new ConcurrentQueue<(Chunk, MeshData)>();
@@ -45,6 +54,8 @@ public class TerrainGenerator : MonoBehaviour
 
     void Start()
     {
+        generationSemaphore = new SemaphoreSlim(maxConcurrentGenerations);
+        
         if (chunkMaterial == null)
         {
             Debug.LogWarning("No material assigned to VoxelTerrain. Assign a simple diffuse material.");
@@ -54,6 +65,7 @@ public class TerrainGenerator : MonoBehaviour
         Random.InitState(seed);
         lastPlayerChunk = new Vector2Int(0, 0);
         GenerateInitialWorld();
+        UpdateChunks();
     }
 
     void GenerateInitialWorld()
@@ -85,11 +97,12 @@ public class TerrainGenerator : MonoBehaviour
         var currentChunk = GetPlayerChunkCoord();
         if (currentChunk != lastPlayerChunk)
         {
+            Debug.Log($"Player chunk: {currentChunk}");
             lastPlayerChunk = currentChunk;
             UpdateChunks();
         }
 
-        int maxApplyPerFrame = 2;
+        int maxApplyPerFrame = 10;
         int applied = 0;
         while (applied < maxApplyPerFrame && meshQueue.TryDequeue(out var result))
         {
@@ -101,43 +114,58 @@ public class TerrainGenerator : MonoBehaviour
     // Called from Chunk (or Chunk task) thread-safe
     public void EnqueueMeshResult(Chunk chunk, MeshData md)
     {
+        if (meshQueue.Count > maxQueuedMeshes)
+        {
+            // either drop this md, or dequeue oldest one to make room.
+            // we'll drop the oldest:
+            meshQueue.TryDequeue(out var _);
+        }
         meshQueue.Enqueue((chunk, md));
     }
 
     void ApplyMeshDataToChunk(Chunk chunk, MeshData md)
     {
-        if (chunk == null || chunk.gameObject == null)
-        {
-            Debug.LogError("Chunk does not exist");
-            return; // chunk destroyed — ignore
-        }
-
+        if (chunk == null || chunk.gameObject == null) return;
         var mf = chunk.GetComponent<MeshFilter>();
-        if (mf == null)
+        if (mf == null) return;
+
+        // destroy existing mesh to free native memory
+        if (mf.sharedMesh != null)
         {
-            Debug.LogError("Mesh filter on chunk does not exist");
-            return; // object destroyed before mesh applied
+            if (Application.isPlaying)
+                UnityEngine.Object.Destroy(mf.sharedMesh);
+            else
+                UnityEngine.Object.DestroyImmediate(mf.sharedMesh);
         }
-    
-
-
-    // create the Unity Mesh and assign it (main thread only)
-        var mr = chunk.GetComponent<MeshRenderer>();
-        var mc = chunk.GetComponent<MeshCollider>();
 
         Mesh mesh = new Mesh();
-        mesh.indexFormat = md.vertices.Count > 65000 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
+        mesh.indexFormat = md.vertices.Count > 65000
+            ? UnityEngine.Rendering.IndexFormat.UInt32
+            : UnityEngine.Rendering.IndexFormat.UInt16;
         mesh.SetVertices(md.vertices);
         mesh.SetTriangles(md.triangles, 0);
         mesh.SetUVs(0, md.uvs);
         mesh.SetNormals(md.normals);
+        mesh.RecalculateBounds();
 
         mf.sharedMesh = mesh;
 
-        if (mc == null) mc = chunk.gameObject.AddComponent<MeshCollider>();
-        mc.sharedMesh = mesh;
+        if (chunk.CurrentLOD == 1)
+        {
+            var mc = chunk.GetComponent<MeshCollider>();
+            if (mc == null) mc = chunk.gameObject.AddComponent<MeshCollider>();
 
-        // mark chunk ready, etc.
+            // destroy old collider mesh and assign new (avoid leaving collider with native mesh references)
+            if (mc.sharedMesh != null)
+            {
+                if (Application.isPlaying)
+                    UnityEngine.Object.Destroy(mc.sharedMesh);
+                else
+                    UnityEngine.Object.DestroyImmediate(mc.sharedMesh);
+            }
+
+            mc.sharedMesh = mesh;
+        }
     }
 
 
@@ -187,6 +215,14 @@ public class TerrainGenerator : MonoBehaviour
                 if (chunkCts.TryGetValue(kvp.Key, out var cts))
                 {
                     cts.Cancel();
+                    if (runningTasks.TryGetValue(kvp.Key, out var task))
+                    {
+                        try
+                        {
+                            task.Wait(50); // wait 100ms (don't block long on main thread)
+                        }
+                        catch { }
+                    }
                     cts.Dispose();
                     chunkCts.Remove(kvp.Key);
                 }
@@ -223,11 +259,13 @@ public class TerrainGenerator : MonoBehaviour
             GameObject go;
             if (chunkPool.Count > 0)
             {
+
                 go = chunkPool.Dequeue();
                 go.SetActive(true);
             }
             else
             {
+
                 go = Instantiate(chunkPrefab, transform);
             }
 
@@ -243,7 +281,8 @@ public class TerrainGenerator : MonoBehaviour
             var cts = new CancellationTokenSource();
             chunkCts[coord] = cts;
 
-            chunk.BuildAsync(lod, cts.Token);
+            StartChunkGeneration(chunk, coord, lod, cts.Token);
+            //chunk.BuildAsync(lod, cts.Token);
             chunks.Add(coord, chunk);
         }
         else
@@ -260,7 +299,8 @@ public class TerrainGenerator : MonoBehaviour
                 }
                 var cts = new CancellationTokenSource();
                 chunkCts[key] = cts;
-                chunk.BuildAsync(lod, cts.Token);
+                //chunk.BuildAsync(lod, cts.Token);
+                StartChunkGeneration(chunk, coord, lod, cts.Token);
             }
         }
     }
@@ -271,5 +311,34 @@ public class TerrainGenerator : MonoBehaviour
         int cz = Mathf.FloorToInt(player.position.z / (chunkSize * blockSize));
         return new Vector2Int(cx, cz);
     }
+
+    private void StartChunkGeneration(Chunk chunk, Vector2Int coord, int lod, CancellationToken token)
+    {
+        // enqueue a Task that respects the semaphore, generation count and registers itself
+        var t = Task.Run(async () =>
+        {
+            try
+            {
+                await generationSemaphore.WaitAsync(token).ConfigureAwait(false);
+                // If cancelled before we started, return
+                if (token.IsCancellationRequested) return;
+                // call the chunk's thread-safe generator directly (it enqueues the result itself)
+                chunk.GenerateAndEnqueue(lod, token); // see next chunk code changes
+            }
+            catch (OperationCanceledException) { /* cancelled */ }
+            finally
+            {
+                generationSemaphore.Release();
+            }
+        }, token);
+
+        runningTasks[coord] = t;
+
+        // when task finishes remove from dictionary
+        t.ContinueWith(_ => {
+            runningTasks.TryRemove(coord, out _);
+        }, TaskScheduler.Default);
+    }
+
 
 }

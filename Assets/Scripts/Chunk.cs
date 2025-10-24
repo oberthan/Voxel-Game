@@ -224,22 +224,25 @@ public class Chunk : MonoBehaviour
     }
 
 
-
     public void Clear()
     {
         if (mf != null && mf.sharedMesh != null)
         {
             if (Application.isPlaying)
-            {
-                Destroy(mf.sharedMesh);
-            }
+                UnityEngine.Object.Destroy(mf.sharedMesh);
             else
-            {
-                DestroyImmediate(mf.sharedMesh);
-            }
+                UnityEngine.Object.DestroyImmediate(mf.sharedMesh);
+            mf.sharedMesh = null;
         }
 
-        if (mc) mc.sharedMesh = null;
+        if (mc != null)
+        {
+            // avoid keeping collider mesh
+            mc.sharedMesh = null;
+            // Optionally destroy collider component if pooling expects clean GameObject:
+            // UnityEngine.Object.Destroy(mc);
+            // mc = null;
+        }
     }
 
 
@@ -445,6 +448,19 @@ public class Chunk : MonoBehaviour
         }
 
         return md;
+    }
+    public void GenerateAndEnqueue(int lod, CancellationToken ct)
+    {
+        // generate md
+        var md = GenerateMeshDataThreadSafe(lod, ct,
+            sizeX, sizeY, sizeZ, blockSize, chunkX, chunkZ,
+            terrainRef.noiseScale, terrainRef.octaves, terrainRef.persistence,
+            terrainRef.lacunarity, terrainRef.heightMultiplier, terrainRef.seed, terrainRef.additionalHeigh);
+
+        if (md == null || ct.IsCancellationRequested) return;
+
+        // enqueue directly - EnqueueMeshResult is thread-safe (ConcurrentQueue)
+        terrainRef.EnqueueMeshResult(this, md);
     }
 
     // --------------------------
